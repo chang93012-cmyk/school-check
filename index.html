@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>오늘의 학교생활 체크 (Cloud)</title>
+<!-- 라이브러리 로드 -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- Firebase SDK (v10+) -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+  import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, collection, getDocs, writeBatch } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCn8tqQqUnzf0GruEqExMcUOyqJUe14z_I",
+    authDomain: "school-check-f9d0a.firebaseapp.com",
+    projectId: "school-check-f9d0a",
+    storageBucket: "school-check-f9d0a.firebasestorage.app",
+    messagingSenderId: "256211323289",
+    appId: "1:256211323289:web:d437ab73d12c002bc6ab08"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  window.db = getFirestore(app);
+  window.FS = { doc, setDoc, getDoc, updateDoc, onSnapshot, collection, getDocs, writeBatch };
+</script>
+
+<style>
+  body{font-family:'Pretendard',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;background:#FFF8F0;}
+  button{min-height:44px}
+  .btn-pad{font-size:1.6rem;padding:1rem;border-radius:1rem;background:#fff;border:2px solid #FCD5CE;}
+  .btn-pad:active{transform:scale(.96);background:#FFE5D9}
+  .pastel-card{background:#fff;border:2px solid #FFE5D9;border-radius:1.25rem;box-shadow:0 4px 0 #FCD5CE}
+  .tab-btn{flex:1;padding:.65rem .25rem;font-size:.85rem;border-radius:.75rem;text-align:center}
+  .tab-btn.active{background:#FFD6A5;font-weight:700}
+  .toast{position:fixed;left:50%;top:1rem;transform:translateX(-50%);background:#333;color:#fff;padding:.6rem 1rem;border-radius:.75rem;z-index:50;animation:fade .25s}
+  @keyframes fade{from{opacity:0;transform:translate(-50%,-10px)}to{opacity:1;transform:translate(-50%,0)}}
+  @media print{
+    body{background:#fff} .no-print{display:none !important} .print-area{box-shadow:none;border:none;margin:0;padding:0}
+    @page{size:A4;margin:12mm}
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ---------- 1) 유틸리티 ---------- */
+async function sha256(str){
+  const buf = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+const todayStr = (d=new Date())=>{
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+};
+const dayKor = ['일','월','화','수','목','금','토'];
+const weekKeys = ['mon','tue','wed','thu','fri'];
+const weekLabel = {mon:'월',tue:'화',wed:'수',thu:'목',fri:'금'};
+const nowHM = ()=>{ const d=new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+const isoToLocalHM = (iso)=>{ if(!iso) return ''; const d=new Date(iso); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+const hmToMin = (hm)=>{ if(!hm) return 0; const [h,m]=hm.split(':').map(Number); return h*60+m; };
+
+const DEFAULT_SUBJECTS = [
+  {name:'국어',color:'#FFD6A5',icon:'📖'}, {name:'수학',color:'#A0E7E5',icon:'🔢'},
+  {name:'사회',color:'#B5EAD7',icon:'🌏'}, {name:'과학',color:'#C7CEEA',icon:'🔬'},
+  {name:'영어',color:'#FFC8DD',icon:'🔤'}, {name:'체육',color:'#FDFFB6',icon:'⚽'},
+  {name:'음악',color:'#E0BBE4',icon:'🎵'}, {name:'미술',color:'#FFDAC1',icon:'🎨'}
+];
+const ACTIVITY_TYPES = ['한자','영어','수학','독서','논술','만들기','그림그리기','기타'];
+
+/* ---------- 2) 메인 App 컴포넌트 ---------- */
+function App() {
+  const [dbReady, setDbReady] = useState(false);
+  const [cls, setCls] = useState(null);
+  const [notice, setNotice] = useState({});
+  const [view, setView] = useState('role');
+  const [session, setSession] = useState(JSON.parse(localStorage.getItem('session')));
+  const [toastMsg, setToastMsg] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const toast = (m) => { setToastMsg(m); setTimeout(()=>setToastMsg(''), 1600); };
+
+  // 1. Firebase 연결 대기 및 실시간 구독
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (window.db) {
+        setDbReady(true);
+        clearInterval(timer);
+      }
+    }, 100);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!dbReady) return;
+
+    // 학급 정보 실시간 구독
+    const unsubClass = FS.onSnapshot(FS.doc(window.db, "config", "class"), (doc) => {
+      if (doc.exists()) setCls(doc.data());
+      else setCls('EMPTY'); // 초기 설정 필요
+      setLoading(false);
+    });
+
+    // 알림장 실시간 구독
+    const unsubNotice = FS.onSnapshot(FS.doc(window.db, "config", "dailyNotice"), (doc) => {
+      if (doc.exists()) setNotice(doc.data());
+    });
+
+    return () => { unsubClass(); unsubNotice(); };
+  }, [dbReady]);
+
+  // 세션 관리
+  const login = (sess) => {
+    localStorage.setItem('session', JSON.stringify(sess));
+    setSession(sess);
+    setView(sess.role === 'teacher' ? 'teacherApp' : 'studentApp');
+  };
+
+  const logout = () => {
+    localStorage.removeItem('session');
+    setSession(null);
+    setView('role');
+  };
+
+  if (loading) return <div className="p-8 text-center">데이터를 불러오고 있습니다...</div>;
+
+  // 초기 셋업 (데이터가 아예 없는 경우)
+  if (cls === 'EMPTY') return <InitialSetup onDone={() => setLoading(true)} />;
+
+  return (
+    <div className="min-h-screen">
+      {toastMsg && <div className="toast">{toastMsg}</div>}
+      {view === 'role' && <RoleSelect onPick={(r) => setView(r === 'student' ? 'studentLogin' : 'teacherLogin')} />}
+      
+      {view === 'studentLogin' && (
+        <StudentLogin cls={cls} onBack={() => setView('role')} onLogged={login} toast={toast} />
+      )}
+      
+      {view === 'teacherLogin' && (
+        <TeacherLogin cls={cls} onBack={() => setView('role')} onLogged={login} toast={toast} />
+      )}
+
+      {view === 'studentApp' && session && (
+        <StudentApp session={session} cls={cls} notice={notice} logout={logout} toast={toast} />
+      )}
+
+      {view === 'teacherApp' && session && (
+        <TeacherApp session={session} cls={cls} notice={notice} logout={logout} toast={toast} />
+      )}
+    </div>
+  );
+}
+
+/* ---------- 3) 컴포넌트들 (주요 로직 Firebase로 교체) ---------- */
+
+// 초기 셋업 로직
+function InitialSetup({ onDone }) {
+  const setup = async () => {
+    const pwHash = await sha256('teacher123');
+    const pin0 = await sha256('0000');
+    const newClass = {
+      name: '우리 반',
+      teacherPasswordHash: pwHash,
+      arrivalTarget: '08:50',
+      subjects: DEFAULT_SUBJECTS,
+      students: [
+        { id: 1, name: '테스트학생', number: 1, avatar: '🐱', pinHash: pin0, isPinChanged: false }
+      ],
+      nextStudentId: 2
+    };
+    await FS.setDoc(FS.doc(window.db, "config", "class"), newClass);
+    onDone();
+  };
+  return (
+    <div className="p-10 text-center">
+      <h2 className="text-xl font-bold mb-4">데이터베이스 초기화가 필요합니다</h2>
+      <button onClick={setup} className="px-6 py-3 bg-blue-400 text-white rounded-xl">기본 데이터 생성</button>
+    </div>
+  );
+}
+
+// 역할 선택
+function RoleSelect({onPick}){
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center p-6">
+      <h1 className="text-3xl font-extrabold mb-2 text-center">🌈 오늘의 학교생활 체크</h1>
+      <p className="text-gray-600 mb-8">언제 어디서든 우리 반의 기록을 확인해요!</p>
+      <div className="grid gap-5 w-full max-w-md">
+        <button onClick={()=>onPick('student')} className="pastel-card text-2xl py-8 hover:bg-orange-50">🧒 학생 로그인</button>
+        <button onClick={()=>onPick('teacher')} className="pastel-card text-2xl py-8 hover:bg-blue-50">👩‍🏫 선생님 로그인</button>
+      </div>
+    </div>
+  );
+}
+
+// 학생 로그인
+function StudentLogin({cls, onBack, onLogged, toast}){
+  const [picked, setPicked] = useState(null);
+  const [pin, setPin] = useState('');
+
+  const tryLogin = async () => {
+    const h = await sha256(pin);
+    if(h === picked.pinHash) {
+      onLogged({ role: 'student', studentId: picked.id, name: picked.name });
+    } else {
+      toast('PIN이 틀렸습니다!');
+      setPin('');
+    }
+  };
+
+  return (
+    <div className="p-4 max-w-3xl mx-auto">
+      <button onClick={onBack} className="mb-3 text-gray-500">← 뒤로</button>
+      <h2 className="text-2xl font-bold mb-4">🧒 {cls.name} 학생 로그인</h2>
+      {!picked ? (
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {cls.students.map(s => (
+            <button key={s.id} onClick={()=>setPicked(s)} className="pastel-card p-4 text-left">
+              <div className="text-3xl">{s.avatar}</div>
+              <div className="font-bold">{s.name}</div>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="max-w-xs mx-auto">
+          <div className="text-center mb-4">
+            <span className="text-4xl">{picked.avatar}</span>
+            <div className="text-xl font-bold">{picked.name}</div>
+          </div>
+          <div className="text-center text-3xl mb-4">{'●'.repeat(pin.length).padEnd(4, '○')}</div>
+          <div className="grid grid-cols-3 gap-2">
+            {[1,2,3,4,5,6,7,8,9,0].map(n => (
+              <button key={n} onClick={()=>setPin(p => p.length < 4 ? p + n : p)} className="btn-pad">{n}</button>
+            ))}
+            <button onClick={()=>setPin('')} className="btn-pad text-sm">지움</button>
+          </div>
+          <button onClick={tryLogin} className="w-full mt-4 py-4 bg-pink-300 rounded-2xl font-bold">로그인</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 선생님 로그인
+function TeacherLogin({cls, onBack, onLogged, toast}){
+  const [pw, setPw] = useState('');
+  const handleLogin = async () => {
+    const h = await sha256(pw);
+    if(h === cls.teacherPasswordHash) {
+      onLogged({ role: 'teacher' });
+    } else {
+      toast('비밀번호가 틀렸습니다.');
+    }
+  };
+  return (
+    <div className="p-6 max-w-md mx-auto">
+      <button onClick={onBack} className="mb-4">← 뒤로</button>
+      <h2 className="text-2xl font-bold mb-4">👩‍🏫 선생님 로그인</h2>
+      <input type="password" value={pw} onChange={e=>setPw(e.target.value)} className="w-full p-3 border-2 rounded-xl mb-4" placeholder="비밀번호 입력" />
+      <button onClick={handleLogin} className="w-full py-3 bg-blue-300 rounded-xl font-bold">접속하기</button>
+    </div>
+  );
+}
+
+/* ---------- 4) 학생 메인화면 (실시간 데이터) ---------- */
+function StudentApp({ session, cls, notice, logout, toast }) {
+  const [tab, setTab] = useState('arrival');
+  const [date, setDate] = useState(todayStr());
+  const [rec, setRec] = useState(null);
+
+  // 해당 학생의 특정 날짜 기록 실시간 구독
+  useEffect(() => {
+    const unsub = FS.onSnapshot(FS.doc(window.db, "records", `${session.studentId}_${date}`), (doc) => {
+      if (doc.exists()) setRec(doc.data());
+      else setRec({ arrival:'', weather:'', selfStudy:[], homework:[], lunchBrushing:{checked:false}, learningNotes:[] });
+    });
+    return unsub;
+  }, [date, session.studentId]);
+
+  const updateRec = async (patch) => {
+    const next = { ...rec, ...patch };
+    await FS.setDoc(FS.doc(window.db, "records", `${session.studentId}_${date}`), next);
+  };
+
+  if (!rec) return <div className="p-10 text-center">불러오는 중...</div>;
+
+  return (
+    <div className="p-4 max-w-3xl mx-auto">
+      <header className="flex justify-between items-center mb-4">
+        <div>
+          <span className="font-bold text-lg">{session.name} 학생</span>
+          <input type="date" value={date} onChange={e=>setDate(e.target.value)} className="ml-2 p-1 border rounded" />
+        </div>
+        <button onClick={logout} className="text-sm text-gray-500">로그아웃</button>
+      </header>
+
+      <div className="flex gap-1 mb-4 overflow-x-auto no-print">
+        {['arrival','self','brush','note','hw'].map(t => (
+          <button key={t} onClick={()=>setTab(t)} className={`tab-btn ${tab===t?'active':'bg-white border'}`}>{t}</button>
+        ))}
+      </div>
+
+      {tab==='arrival' && (
+        <div className="pastel-card p-4">
+          <h3 className="font-bold mb-2">🏫 등교 시간 체크</h3>
+          <div className="flex gap-2">
+            <input type="time" value={rec.arrival} onChange={e=>updateRec({arrival:e.target.value})} className="border p-2 rounded-xl" />
+            <button onClick={()=>updateRec({arrival:nowHM()})} className="px-3 bg-yellow-200 rounded-xl">지금</button>
+          </div>
+          <div className="mt-4">
+            <h4 className="font-bold mb-2">☁️ 오늘 마음 날씨</h4>
+            <div className="flex gap-2">
+              {['☀️','☁️','🌧️','⚡'].map(w => (
+                <button key={w} onClick={()=>updateRec({weather:w})} className={`text-2xl p-2 rounded-xl ${rec.weather===w?'bg-blue-100':''}`}>{w}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab==='self' && <TabSelfStudy rec={rec} update={updateRec} notice={notice[date]} toast={toast} />}
+      {tab==='brush' && <div className="pastel-card p-4 text-center">
+        <button onClick={()=>updateRec({lunchBrushing:{checked:!rec.lunchBrushing.checked, checkedAt:new Date().toISOString()}})} 
+          className={`w-full py-10 text-3xl rounded-2xl ${rec.lunchBrushing.checked?'bg-green-200':'bg-gray-100 border-2'}`}>
+          {rec.lunchBrushing.checked ? '🦷 양치 완료!' : '🪥 양치 체크'}
+        </button>
+      </div>}
+      {tab==='note' && <TabLearningNote rec={rec} update={updateRec} cls={cls} />}
+      {tab==='hw' && <TabHomework rec={rec} update={updateRec} notice={notice[date]} cls={cls} />}
+    </div>
+  );
+}
+
+/* ---------- 5) 자습, 배움노트 등 상세 컴포넌트 ---------- */
+
+function TabLearningNote({rec, update, cls}) {
+  const setNote = (idx, content) => {
+    const notes = [...(rec.learningNotes || [])];
+    notes[idx] = { content };
+    update({ learningNotes: notes });
+  };
+  return (
+    <div className="space-y-3">
+      {[1,2,3,4,5,6].map(p => (
+        <div key={p} className="pastel-card p-3">
+          <div className="font-bold mb-2">{p}교시 배움기록</div>
+          <textarea value={rec.learningNotes?.[p-1]?.content || ''} 
+            onChange={e=>setNote(p-1, e.target.value)}
+            className="w-full p-2 border rounded-xl" placeholder="배운 내용을 10자 이상 적어주세요." rows="2" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TabSelfStudy({rec, update, notice, toast}) {
+  const [type, setType] = useState('독서');
+  const start = () => {
+    const item = { type, startTime: new Date().toISOString(), endTime: null, minutes: 0 };
+    update({ selfStudy: [...(rec.selfStudy || []), item] });
+  };
+  const end = () => {
+    const list = [...rec.selfStudy];
+    const idx = list.findIndex(x => !x.endTime);
+    if(idx < 0) return;
+    const startMs = new Date(list[idx].startTime).getTime();
+    list[idx].endTime = new Date().toISOString();
+    list[idx].minutes = Math.round((Date.now() - startMs) / 60000);
+    update({ selfStudy: list });
+  };
+  const running = rec.selfStudy?.find(x => !x.endTime);
+
+  return (
+    <div className="pastel-card p-4">
+      <h3 className="font-bold mb-2">📚 자습 기록</h3>
+      <div className="flex gap-2 mb-4">
+        {ACTIVITY_TYPES.slice(0,4).map(t => (
+          <button key={t} onClick={()=>setType(t)} className={`px-3 py-1 rounded-xl border ${type===t?'bg-pink-100':''}`}>{t}</button>
+        ))}
+      </div>
+      {!running ? <button onClick={start} className="w-full py-3 bg-green-200 rounded-xl font-bold">▶ 활동 시작</button>
+                : <button onClick={end} className="w-full py-3 bg-red-200 rounded-xl font-bold">■ 활동 종료 ({running.type})</button>}
+    </div>
+  );
+}
+
+function TabHomework({rec, update, notice, cls}){
+  const list = notice?.homework || [];
+  const toggle = (idx) => {
+    const doneList = rec.homework || [];
+    if(doneList.includes(idx)) update({ homework: doneList.filter(i => i !== idx) });
+    else update({ homework: [...doneList, idx] });
+  };
+  return (
+    <div className="pastel-card p-4">
+      <h3 className="font-bold mb-3">✏️ 오늘 할 일</h3>
+      {list.length === 0 && <p className="text-gray-400">등록된 알림장이 없습니다.</p>}
+      {list.map((h, i) => (
+        <label key={i} className="flex items-center gap-3 p-2 border-b">
+          <input type="checkbox" checked={rec.homework?.includes(i)} onChange={()=>toggle(i)} className="w-5 h-5" />
+          <span>[{h.subject}] {h.content}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/* ---------- 6) 선생님 메인화면 ---------- */
+function TeacherApp({ session, cls, notice, logout, toast }) {
+  const [tab, setTab] = useState('dash');
+  const [date, setDate] = useState(todayStr());
+
+  // 알림장 업데이트
+  const updateNotice = async (newHw) => {
+    const next = { ...notice, [date]: { homework: newHw } };
+    await FS.setDoc(FS.doc(window.db, "config", "dailyNotice"), next);
+  };
+
+  return (
+    <div className="p-4 max-w-6xl mx-auto">
+      <header className="flex justify-between items-center mb-4 no-print">
+        <h2 className="text-xl font-bold">👩‍🏫 선생님 모드 ({cls.name})</h2>
+        <button onClick={logout}>로그아웃</button>
+      </header>
+      
+      <div className="flex gap-1 mb-4 overflow-x-auto no-print">
+        {[{k:'dash',l:'📊 현황'},{k:'hw',l:'✏️ 알림장'},{k:'manage',l:'👥 학생관리'}].map(t => (
+          <button key={t.k} onClick={()=>setTab(t.k)} className={`tab-btn ${tab===t.k?'active':'bg-white border'}`}>{t.l}</button>
+        ))}
+      </div>
+
+      <div className="mb-4 no-print">날짜 선택: <input type="date" value={date} onChange={e=>setDate(e.target.value)} className="p-1 border rounded" /></div>
+
+      {tab === 'dash' && <TeacherDashboard cls={cls} date={date} />}
+      {tab === 'hw' && <TeacherHwManager notice={notice[date]} onUpdate={updateNotice} cls={cls} />}
+      {tab === 'manage' && <TeacherStudentManager cls={cls} toast={toast} />}
+    </div>
+  );
+}
+
+function TeacherDashboard({cls, date}) {
+  const [recs, setRecs] = useState({});
+  useEffect(() => {
+    const fetchAll = async () => {
+      const data = {};
+      for(const s of cls.students) {
+        const d = await FS.getDoc(FS.doc(window.db, "records", `${s.id}_${date}`));
+        if(d.exists()) data[s.id] = d.data();
+      }
+      setRecs(data);
+    };
+    fetchAll();
+  }, [date, cls.students]);
+
+  return (
+    <div className="pastel-card p-4">
+      <table className="w-full text-sm">
+        <thead><tr className="border-b"><th>번호</th><th>이름</th><th>등교</th><th>양치</th><th>자습</th><th>비고</th></tr></thead>
+        <tbody>
+          {cls.students.map(s => {
+            const r = recs[s.id] || {};
+            return (
+              <tr key={s.id} className="text-center border-b h-10">
+                <td>{s.number}</td><td>{s.name}</td>
+                <td>{r.arrival || '-'}</td>
+                <td>{r.lunchBrushing?.checked ? '✅' : '❌'}</td>
+                <td>{r.selfStudy?.length || 0}개</td>
+                <td className="text-xs">{r.weather}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TeacherHwManager({notice, onUpdate, cls}) {
+  const [s, setS] = useState('국어');
+  const [c, setC] = useState('');
+  const add = () => {
+    const list = notice?.homework || [];
+    onUpdate([...list, { subject: s, content: c }]);
+    setC('');
+  };
+  return (
+    <div className="pastel-card p-4">
+      <div className="flex gap-2 mb-4">
+        <select value={s} onChange={e=>setS(e.target.value)} className="border p-2 rounded-xl">
+          {cls.subjects.map(subj => <option key={subj.name} value={subj.name}>{subj.name}</option>)}
+        </select>
+        <input value={c} onChange={e=>setC(e.target.value)} className="flex-1 border p-2 rounded-xl" placeholder="숙제 내용 입력" />
+        <button onClick={add} className="px-4 bg-blue-200 rounded-xl">추가</button>
+      </div>
+      <ul className="space-y-2">
+        {(notice?.homework || []).map((h, i) => (
+          <li key={i} className="flex justify-between border-b py-2">
+            <span>[{h.subject}] {h.content}</span>
+            <button onClick={()=>onUpdate(notice.homework.filter((_, idx)=>idx!==i))} className="text-red-400">삭제</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function TeacherStudentManager({cls, toast}) {
+  const [csv, setCsv] = useState('');
+  
+  // 마이그레이션 함수: LocalStorage -> Firestore
+  const migrate = async () => {
+    if(!confirm("기존 이 기기에 저장된 모든 데이터를 Firebase 서버로 옮길까요?")) return;
+    try {
+      const batch = FS.writeBatch(window.db);
+      
+      // 1. 학급 설정 이전
+      const localClass = JSON.parse(localStorage.getItem('class'));
+      if(localClass) batch.set(FS.doc(window.db, "config", "class"), localClass);
+
+      // 2. 알림장 이전
+      const localNotice = JSON.parse(localStorage.getItem('dailyNotice'));
+      if(localNotice) batch.set(FS.doc(window.db, "config", "dailyNotice"), localNotice);
+
+      // 3. 개별 학생 기록 이전
+      for(let i=0; i<localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if(key.startsWith('records_')) {
+          const studentId = key.replace('records_', '');
+          const data = JSON.parse(localStorage.getItem(key));
+          Object.entries(data).forEach(([date, record]) => {
+            batch.set(FS.doc(window.db, "records", `${studentId}_${date}`), record);
+          });
+        }
+      }
+
+      await batch.commit();
+      toast("마이그레이션 성공! 이제 모든 기기에서 볼 수 있습니다.");
+    } catch(e) {
+      alert("오류 발생: " + e.message);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="pastel-card p-4">
+        <h3 className="font-bold mb-2">📥 기존 데이터 서버로 올리기</h3>
+        <p className="text-sm text-gray-500 mb-3">현재 PC/폰에만 있는 기록을 온라인 서버(Firebase)로 전송합니다.</p>
+        <button onClick={migrate} className="w-full py-3 bg-orange-400 text-white rounded-xl font-bold">로컬 데이터를 클라우드로 동기화</button>
+      </div>
+      <div className="pastel-card p-4">
+        <h3 className="font-bold mb-2">👥 학급 관리</h3>
+        <p className="text-sm">현재 학생 수: {cls.students.length}명</p>
+        {/* 학생 추가 등 기존 로직 추가 가능 */}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
