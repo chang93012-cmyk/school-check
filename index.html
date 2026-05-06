@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>오늘의 학교생활 체크</title>
+<!-- React & Tailwind -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- Firebase v8 -->
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+
+<style>
+  body{font-family:'Pretendard',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;background:#FFF8F0;}
+  button{min-height:44px}
+  .btn-pad{font-size:1.6rem;padding:1rem;border-radius:1rem;background:#fff;border:2px solid #FCD5CE;}
+  .btn-pad:active{transform:scale(.96);background:#FFE5D9}
+  .pastel-card{background:#fff;border:2px solid #FFE5D9;border-radius:1.25rem;box-shadow:0 4px 0 #FCD5CE}
+  .tab-btn{flex:1;padding:.65rem .25rem;font-size:.85rem;border-radius:.75rem;text-align:center}
+  .tab-btn.active{background:#FFD6A5;font-weight:700}
+  .toast{position:fixed;left:50%;top:1rem;transform:translateX(-50%);background:#333;color:#fff;padding:.6rem 1rem;border-radius:.75rem;z-index:50;animation:fade .25s}
+  @keyframes fade{from{opacity:0;transform:translate(-50%,-10px)}to{opacity:1;transform:translate(-50%,0)}}
+  @media print{
+    body{background:#fff}
+    .no-print{display:none !important}
+    .print-area{box-shadow:none;border:none;margin:0;padding:0}
+    @page{size:A4;margin:12mm}
+    .print-area, .print-area *{break-inside:avoid;page-break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+/* =========================================================
+   오늘의 학교생활 체크 — Firebase 실시간 연동 (수정본)
+   ========================================================= */
+
+// 수정된 Firebase 설정값
+const firebaseConfig = {
+  apiKey: "AIzaSyCn8tqQqUnzf0GruEqExMcUOyqJUe14z_I",
+  authDomain: "school-check-f9d0a.firebaseapp.com",
+  databaseURL: "https://school-check-f9d0a-default-rtdb.firebaseio.com",
+  projectId: "school-check-f9d0a",
+  storageBucket: "school-check-f9d0a.firebasestorage.app",
+  messagingSenderId: "256211323289",
+  appId: "1:256211323289:web:d437ab73d12c002bc6ab08"
+};
+
+// Firebase 초기화
+if (!firebase.apps.length) { firebase.initializeApp(firebaseConfig); }
+const db = firebase.database();
+
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ---------- 1) 유틸 & Firebase 동기화 시스템 ---------- */
+async function sha256(str){
+  const buf = new TextEncoder().encode(str);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+let CloudData = {};
+
+const LS = {
+  get: (k, d=null) => {
+    if(k === 'session' || k === 'loginFails' || k.startsWith('studentTT_')) {
+      try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch{return d;}
+    }
+    return CloudData[k] !== undefined ? JSON.parse(JSON.stringify(CloudData[k])) : d; 
+  },
+  set: (k, v) => {
+    if(k === 'session' || k === 'loginFails' || k.startsWith('studentTT_')) {
+      localStorage.setItem(k,JSON.stringify(v)); return;
+    }
+    CloudData[k] = v;
+    db.ref(k).set(v); 
+  },
+  del: (k) => {
+    if(k === 'session' || k === 'loginFails' || k.startsWith('studentTT_')) {
+      localStorage.removeItem(k); return;
+    }
+    delete CloudData[k];
+    db.ref(k).remove();
+  }
+};
+
+const todayStr = (d=new Date())=>{
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+};
+const dayKor = ['일','월','화','수','목','금','토'];
+const weekLabel = {mon:'월',tue:'화',wed:'수',thu:'목',fri:'금'};
+const weekKeys = ['mon','tue','wed','thu','fri'];
+const nowHM = ()=>{ const d=new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+const isoToLocalHM = (iso)=>{ if(!iso) return ''; const d=new Date(iso); if(isNaN(d)) return ''; return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+const hmToMin = (hm)=>{ if(!hm) return 0; const [h,m]=hm.split(':').map(Number); return h*60+m; };
+const isoToLocalYMDHM = (iso) => {
+  if (!iso) return '-'; const d = new Date(iso); if(isNaN(d)) return '-';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+const AVATARS = ['🐱','🐶','🦖','🐰','🐻','🐼','🦁','🐯','🐵','🦊','🐧','🐸'];
+const DEFAULT_SUBJECTS = [
+  {name:'국어',color:'#FFD6A5',icon:'📖'}, {name:'수학',color:'#A0E7E5',icon:'🔢'},
+  {name:'사회',color:'#B5EAD7',icon:'🌏'}, {name:'과학',color:'#C7CEEA',icon:'🔬'},
+  {name:'영어',color:'#FFC8DD',icon:'🔤'}, {name:'체육',color:'#FDFFB6',icon:'⚽'},
+  {name:'음악',color:'#E0BBE4',icon:'🎵'}, {name:'미술',color:'#FFDAC1',icon:'🎨'},
+];
+const ACTIVITY_TYPES = ['한자','영어','수학','독서','논술','만들기','그림그리기','기타'];
+
+async function seedIfEmpty(){
+  if(CloudData['class']) return;
+  const teacherPasswordHash = await sha256('teacher123');
+  const pin0 = await sha256('0000');
+  const cls = {
+    name:'3학년 2반', teacherPasswordHash,
+    arrivalTarget:'08:50', lunchBrushTime:'13:00', brushNotice:'점심 먹고 양치 잊지 말기! 🪥',
+    subjects: DEFAULT_SUBJECTS,
+    defaultTimetable: {
+      mon:['국어','수학','사회','과학','영어','체육'], tue:['수학','국어','음악','미술','영어','체육'],
+      wed:['국어','수학','과학','사회','체육','영어'], thu:['수학','국어','영어','미술','음악','체육'],
+      fri:['국어','수학','사회','과학','체육','영어'],
+    },
+    students:[
+      {id:1,name:'홍길동',number:1,avatar:'🐱',pinHash:pin0,isPinChanged:false,lastLogin:null},
+      {id:2,name:'김영희',number:2,avatar:'🐰',pinHash:pin0,isPinChanged:false,lastLogin:null},
+      {id:3,name:'이철수',number:3,avatar:'🦖',pinHash:pin0,isPinChanged:false,lastLogin:null},
+      {id:4,name:'박민지',number:4,avatar:'🐶',pinHash:pin0,isPinChanged:false,lastLogin:null},
+    ],
+    nextStudentId:5
+  };
+  LS.set('class', cls);
+  LS.set('dailyNotice', {
+    [todayStr()]:{
+      selfStudyGuide:'수학 23~25쪽 풀기', recommendedActivities:['수학','독서'], recommendedMinutes:20,
+      homework:[{subject:'수학',content:'23~25쪽',due:todayStr()}], brushNotice:'점심 먹고 양치 잊지 말기!'
+    }
+  });
+}
+
+function useToast(){
+  const [msg,setMsg]=useState('');
+  const show=(m)=>{ setMsg(m); setTimeout(()=>setMsg(''),1600); };
+  const view = msg ? <div className="toast">{msg}</div> : null;
+  return [show, view];
+}
+
+/* ---------- 2) 메인 앱 ---------- */
+function App(){
+  const [ready,setReady]=useState(false);
+  const [session,setSession]=useState(LS.get('session'));
+  const [view,setView]=useState('role');
+  const [tmpStudent,setTmpStudent]=useState(null);
+  const [toast,toastView]=useToast();
+  const [,setTick]=useState(0);
+
+  useEffect(()=>{
+    const ref = db.ref('/');
+    ref.on('value', async (snap) => {
+      const val = snap.val() || {};
+      CloudData = val;
+      if (!val.class) { await seedIfEmpty(); }
+      setReady(true);
+      setTick(t => t + 1);
+    });
+    return () => ref.off();
+  },[]);
+
+  useEffect(()=>{
+    if(!ready) return;
+    const s = LS.get('session');
+    if(!s){ setView('role'); return; }
+    const now = Date.now();
+    if(s.keepLogin){ if(now - s.loginAtMs > 30*24*3600*1000){ logout(); return; } }
+    else { if(now - (s.lastActiveMs||s.loginAtMs) > 30*60*1000){ logout(); return; } }
+    setSession(s);
+    setView(s.role==='teacher' ? 'teacherApp' : 'studentApp');
+  },[ready]);
+
+  const logout = ()=>{ LS.del('session'); setSession(null); setView('role'); };
+  const touch = ()=>{ const s=LS.get('session'); if(s){ s.lastActiveMs=Date.now(); LS.set('session',s); } };
+  useEffect(()=>{
+    const h=()=>touch();
+    window.addEventListener('click',h); window.addEventListener('keydown',h);
+    return ()=>{ window.removeEventListener('click',h); window.removeEventListener('keydown',h); };
+  },[]);
+
+  if(!ready) return <div className="min-h-screen flex items-center justify-center text-xl font-bold p-8">서버와 연결 중... ☁️</div>;
+
+  return (
+    <div className="min-h-screen">
+      {toastView}
+      {view==='role' && <RoleSelect onPick={(r)=>setView(r==='student'?'studentLogin':'teacherLogin')} />}
+      {view==='studentLogin' && <StudentLogin onBack={()=>setView('role')}
+          onLogged={(stu, sess)=>{ LS.set('session', sess); setSession(sess);
+            if(!stu.isPinChanged){ setTmpStudent(stu); setView('pinChange'); } else setView('studentApp');
+          }} toast={toast} />}
+      {view==='pinChange' && <PinChange student={tmpStudent}
+          onDone={()=>{ setTmpStudent(null); setView('studentApp'); toast('환영해요! 🎉'); }} toast={toast}/>}
+      {view==='teacherLogin' && <TeacherLogin onBack={()=>setView('role')}
+          onLogged={(sess)=>{ LS.set('session',sess); setSession(sess); setView('teacherApp'); }} toast={toast}/>}
+      {view==='studentApp' && session && <StudentApp session={session} logout={logout} toast={toast}/>}
+      {view==='teacherApp' && session && <TeacherApp session={session} logout={logout} toast={toast}/>}
+    </div>
+  );
+}
+
+function RoleSelect({onPick}){
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center p-6">
+      <h1 className="text-3xl md:text-4xl font-extrabold mb-2">🌈 오늘의 학교생활 체크</h1>
+      <p className="text-gray-600 mb-8">우리 반 친구들과 즐겁게 기록해요! (실시간 연동)</p>
+      <div className="grid gap-5 w-full max-w-md">
+        <button onClick={()=>onPick('student')} className="pastel-card text-2xl py-8 hover:bg-orange-50">🧒 학생 로그인</button>
+        <button onClick={()=>onPick('teacher')} className="pastel-card text-2xl py-8 hover:bg-blue-50">👩‍🏫 선생님 로그인</button>
+      </div>
+    </div>
+  );
+}
+
+function StudentLogin({onBack,onLogged,toast}){
+  const cls = LS.get('class');
+  const [picked,setPicked]=useState(null);
+  const [pin,setPin]=useState('');
+  const [keep,setKeep]=useState(false);
+  const fails = LS.get('loginFails')||{};
+  const lockKey = picked ? `s${picked.id}` : null;
+  const lockedUntil = lockKey ? (fails[lockKey]?.lockedUntil||0) : 0;
+  const isLocked = Date.now()<lockedUntil;
+
+  const tryLogin = async ()=>{
+    if(pin.length!==4){ toast('PIN 4자리를 입력해요'); return; }
+    const h = await sha256(pin);
+    if(h===picked.pinHash){
+      const cls2 = LS.get('class');
+      const idx = cls2.students.findIndex(s=>s.id===picked.id);
+      cls2.students[idx].lastLogin = new Date().toISOString();
+      LS.set('class',cls2);
+      const f={...fails}; delete f[lockKey]; LS.set('loginFails',f);
+      const sess = {role:'student', studentId:picked.id, loginAt:new Date().toISOString(), loginAtMs:Date.now(), lastActiveMs:Date.now(), keepLogin:keep};
+      onLogged(cls2.students[idx], sess);
+    } else {
+      const f={...fails}; const cur = f[lockKey]||{count:0}; cur.count += 1;
+      if(cur.count>=5){ cur.lockedUntil = Date.now()+30000; cur.count=0; toast('5회 실패! 30초 잠금 🔒'); }
+      else toast(`PIN이 달라요. 다시 입력해보세요! (${cur.count}/5)`);
+      f[lockKey]=cur; LS.set('loginFails',f); setPin('');
+    }
+  };
+
+  return (
+    <div className="min-h-screen p-4 max-w-3xl mx-auto">
+      <button onClick={onBack} className="mb-3 text-gray-600">← 처음으로</button>
+      <h2 className="text-2xl font-bold mb-3">🧒 학생 로그인 — {cls?.name}</h2>
+      {!picked && (
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {[...(cls?.students||[])].sort((a,b)=>a.number-b.number).map(s=>(
+            <button key={s.id} onClick={()=>setPicked(s)} className="pastel-card p-4 text-left hover:bg-pink-50">
+              <div className="text-4xl">{s.avatar||'🙂'}</div>
+              <div className="text-xs text-gray-500">{s.number}번</div>
+              <div className="text-lg font-bold">{s.name}</div>
+            </button>
+          ))}
+        </div>
+      )}
+      {picked && (
+        <div>
+          <div className="pastel-card p-4 mb-4 flex items-center gap-3">
+            <div className="text-4xl">{picked.avatar}</div>
+            <div className="flex-1"><div className="text-xs text-gray-500">{picked.number}번</div><div className="text-xl font-bold">{picked.name}</div></div>
+            <button onClick={()=>{setPicked(null);setPin('');}} className="text-gray-500 text-sm">바꾸기</button>
+          </div>
+          <div className="text-center text-3xl tracking-widest my-3 h-10">{('●'.repeat(pin.length)).padEnd(4,'○')}</div>
+          {isLocked ? ( <div className="text-center text-red-500 my-4">🔒 잠시 멈췄어요.</div> ) : (
+            <div className="grid grid-cols-3 gap-2 max-w-xs mx-auto">
+              {[1,2,3,4,5,6,7,8,9].map(n=><button key={n} className="btn-pad" onClick={()=>setPin(p=>p.length<4?p+n:p)}>{n}</button>)}
+              <button className="btn-pad" onClick={()=>setPin('')}>지움</button>
+              <button className="btn-pad" onClick={()=>setPin(p=>p.length<4?p+'0':p)}>0</button>
+              <button className="btn-pad" onClick={()=>setPin(p=>p.slice(0,-1))}>←</button>
+            </div>
+          )}
+          <label className="flex items-center gap-2 mt-4"><input type="checkbox" checked={keep} onChange={e=>setKeep(e.target.checked)} /> <span>로그인 상태 유지 (30일)</span></label>
+          <button disabled={isLocked || pin.length!==4} onClick={tryLogin} className="w-full mt-4 py-4 rounded-2xl bg-pink-300 disabled:bg-gray-200 text-lg font-bold">로그인</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PinChange({student,onDone,toast}){
+  const [step,setStep]=useState(1);
+  const [pin1,setPin1]=useState(''); const [pin2,setPin2]=useState('');
+  const [avatar,setAvatar]=useState(student.avatar||'🐱');
+  const cur = step===1?pin1:pin2; const setCur = step===1?setPin1:setPin2;
+
+  const next = async ()=>{
+    if(step===1){ if(pin1.length!==4){toast('4자리를 입력해주세요');return;} setStep(2); }
+    else if(step===2){ if(pin1!==pin2){ toast('두 PIN이 달라요!'); setPin2(''); return; } setStep(3); }
+    else {
+      const cls = LS.get('class'); const i = cls.students.findIndex(s=>s.id===student.id);
+      cls.students[i].pinHash = await sha256(pin1); cls.students[i].isPinChanged = true; cls.students[i].avatar = avatar;
+      LS.set('class',cls); onDone();
+    }
+  };
+
+  if(step===3){
+    return (
+      <div className="min-h-screen p-6 max-w-md mx-auto">
+        <h2 className="text-2xl font-bold mb-2">🎨 내 아바타를 골라요!</h2>
+        <div className="grid grid-cols-4 gap-3 my-4">
+          {AVATARS.map(a=><button key={a} onClick={()=>setAvatar(a)} className={`text-4xl p-3 rounded-2xl border-2 ${avatar===a?'bg-yellow-100 border-yellow-400':'bg-white'}`}>{a}</button>)}
+        </div>
+        <button onClick={next} className="w-full py-4 rounded-2xl bg-pink-300 font-bold text-lg">완료!</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen p-6 max-w-md mx-auto">
+      <h2 className="text-2xl font-bold mb-1">🔐 PIN을 새로 만들어요</h2>
+      <div className="text-center text-3xl tracking-widest my-3 h-10">{('●'.repeat(cur.length)).padEnd(4,'○')}</div>
+      <div className="grid grid-cols-3 gap-2 max-w-xs mx-auto">
+        {[1,2,3,4,5,6,7,8,9].map(n=><button key={n} className="btn-pad" onClick={()=>setCur(p=>p.length<4?p+n:p)}>{n}</button>)}
+        <button className="btn-pad" onClick={()=>setCur('')}>지움</button>
+        <button className="btn-pad" onClick={()=>setCur(p=>p.length<4?p+'0':p)}>0</button>
+        <button className="btn-pad" onClick={()=>setCur(p=>p.slice(0,-1))}>←</button>
+      </div>
+      <button disabled={cur.length!==4} onClick={next} className="w-full mt-4 py-4 rounded-2xl bg-pink-300 font-bold text-lg">{step===1?'다음':'확인'}</button>
+    </div>
+  );
+}
+
+function TeacherLogin({onBack,onLogged,toast}){
+  const cls = LS.get('class');
+  const [pw,setPw]=useState('');
+  const fails = LS.get('loginFails')||{};
+  const lockedUntil = fails['teacher']?.lockedUntil||0;
+
+  const submit = async ()=>{
+    if(pw.length<6){toast('6자 이상 입력해주세요');return;}
+    const h = await sha256(pw);
+    if(h===cls.teacherPasswordHash){
+      const f=LS.get('loginFails')||{}; delete f['teacher']; LS.set('loginFails',f);
+      onLogged({role:'teacher',loginAt:new Date().toISOString(),loginAtMs:Date.now(),lastActiveMs:Date.now(),keepLogin:false});
+    } else {
+      const f=LS.get('loginFails')||{}; const cur=f['teacher']||{count:0}; cur.count+=1;
+      if(cur.count>=5){cur.lockedUntil=Date.now()+30000;cur.count=0;toast('5회 실패! 30초 잠금');}
+      else toast(`비밀번호가 달라요 (${cur.count}/5)`);
+      f['teacher']=cur; LS.set('loginFails',f); setPw('');
+    }
+  };
+
+  return (
+    <div className="min-h-screen p-6 max-w-md mx-auto">
+      <button onClick={onBack} className="mb-3 text-gray-600">← 처음으로</button>
+      <h2 className="text-2xl font-bold mb-3">👩‍🏫 선생님 로그인</h2>
+      <div className="pastel-card p-4">
+        <p className="text-gray-700 mb-2">학급: <b>{cls?.name}</b></p>
+        <input type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="비밀번호" className="w-full p-3 border-2 rounded-xl"/>
+        <button disabled={Date.now()<lockedUntil} onClick={submit} className="w-full mt-3 py-3 rounded-xl bg-blue-300 font-bold">로그인</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 3) 학생 앱 ---------- */
+function StudentApp({session,logout,toast}){
+  const [tab,setTab]=useState('arrival');
+  const [currentDate, setCurrentDate] = useState(todayStr());
+  
+  const cls = LS.get('class');
+  const student = cls.students.find(s=>s.id===session.studentId);
+  const recKey = `records_${student.id}`;
+
+  const allRec = LS.get(recKey, {});
+  const rec = allRec[currentDate] || { arrival:'', weather: '', timetable:[], selfStudy:[], homework:[], lunchBrushing:{checked:false}, learningNotes:[], teacherComment:'', completed:false };
+
+  const update = (patch)=>{
+    const currentAll = LS.get(recKey,{});
+    const currentRec = currentAll[currentDate] || { arrival:'', weather: '', timetable:[], selfStudy:[], homework:[], lunchBrushing:{checked:false}, learningNotes:[], teacherComment:'', completed:false };
+    const next = {...currentRec, ...patch};
+    next.completed = computeCompleted(next, cls, currentDate);
+    currentAll[currentDate]=next; 
+    LS.set(recKey, currentAll);
+  };
+
+  const notice = (LS.get('dailyNotice',{})[currentDate])||{};
+  const progress = useMemo(()=>computeProgress(rec, cls, currentDate),[rec,cls,currentDate]);
+  const [showPinChange,setShowPinChange]=useState(false);
+
+  const tabs = [
+    {k:'arrival',label:'🏫 등교'}, {k:'self',label:'📚 자습'}, {k:'brush',label:'🪥 양치'},
+    {k:'tt',label:'🗓️ 시간표'}, {k:'note',label:'📝 배움노트'}, {k:'hw',label:'✏️ 숙제'}, {k:'dash',label:'📈 내 기록'},
+  ];
+
+  return (
+    <div className="min-h-screen max-w-3xl mx-auto p-4">
+      <header className="flex items-center gap-3 mb-3">
+        <div className="text-4xl">{student.avatar}</div>
+        <div className="flex-1"><div className="text-xs text-gray-500">{student.number}번 · {cls.name}</div><div className="text-xl font-extrabold">{student.name}</div>
+          <div className="mt-1 flex items-center gap-2 text-gray-700">
+            <input type="date" value={currentDate} onChange={(e) => setCurrentDate(e.target.value)} className="border border-gray-300 rounded p-1 text-sm font-bold bg-white" />
+            <span className="text-sm">({dayKor[new Date(currentDate).getDay()]}요일)</span>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1"><button onClick={()=>setShowPinChange(true)} className="text-xs px-2 py-1 border rounded bg-white">PIN변경</button><button onClick={logout} className="text-xs px-2 py-1 border rounded bg-white">로그아웃</button></div>
+      </header>
+      <div className="pastel-card p-3 mb-3">
+        <div className="flex justify-between text-sm mb-1"><span>오늘의 달성률</span><span className="font-bold">{progress.percent}% ({progress.done}/5)</span></div>
+        <div className="h-3 bg-gray-100 rounded-full overflow-hidden"><div className="h-full bg-gradient-to-r from-pink-300 to-yellow-300 transition-all" style={{width:`${progress.percent}%`}}/></div>
+      </div>
+      <div className="flex gap-1 mb-3 overflow-x-auto">{tabs.map(t=><button key={t.k} onClick={()=>setTab(t.k)} className={`tab-btn whitespace-nowrap min-w-[70px] ${tab===t.k?'active':'bg-white border'}`}>{t.label}</button>)}</div>
+      {tab==='arrival' && <TabArrival rec={rec} update={update} cls={cls} toast={toast}/>}
+      {tab==='self' && <TabSelfStudy rec={rec} update={update} notice={notice} toast={toast}/>}
+      {tab==='hw' && <TabHomework rec={rec} update={update} notice={notice} toast={toast} cls={cls}/>}
+      {tab==='brush' && <TabBrush rec={rec} update={update} cls={cls} notice={notice} toast={toast}/>}
+      {tab==='note' && <TabLearningNote rec={rec} update={update} cls={cls} toast={toast}/>}
+      {tab==='tt' && <TabTimetable date={currentDate} rec={rec} update={update} cls={cls} toast={toast}/>}
+      {tab==='dash' && <TabStudentDash recKey={recKey} student={student} currentDate={currentDate} cls={cls} />}
+      {showPinChange && <PinChangeModal student={student} onClose={()=>setShowPinChange(false)} toast={toast}/>}
+    </div>
+  );
+}
+
+function computeProgress(rec, cls, date){
+  let done=0; if(rec.arrival) done++; if(rec.selfStudy && rec.selfStudy.length>0) done++;
+  const hw = rec.homework||[]; if(hw.length>0 && hw.every(h=>h.done)) done++; if(rec.lunchBrushing?.checked) done++;
+  const tt = rec.timetable||[]; const filledPeriods = tt.filter(Boolean).length;
+  const notes = rec.learningNotes||[]; if(filledPeriods>0 && notes.filter(n=>n.content?.length>=10).length>=filledPeriods) done++;
+  return {done, percent: Math.round((done/5)*100)};
+}
+function computeCompleted(rec, cls, date){ return computeProgress(rec, cls, date).done===5; }
+
+function TabArrival({rec,update,cls,toast}){
+  const [time,setTime]=useState(rec.arrival||''); const [mood,setMood]=useState(rec.mood||''); const [weather,setWeather]=useState(rec.weather||'');
+  const weatherOptions = ['☀️', '⛅', '☁️', '🌧️', '⚡'];
+  return (
+    <div className="pastel-card p-4">
+      <h3 className="text-xl font-bold mb-2">🏫 등교 시간 체크</h3>
+      <div className="flex gap-2 mb-3"><input type="time" value={time} onChange={e=>setTime(e.target.value)} className="border-2 rounded-xl px-3 py-2 text-lg"/><button onClick={()=>setTime(nowHM())} className="px-3 py-2 rounded-xl bg-yellow-200">지금시각</button></div>
+      <h3 className="text-lg font-bold mb-2">☁️ 마음의 날씨</h3>
+      <div className="flex justify-between mb-3 bg-white p-2 rounded-xl border-2">{weatherOptions.map(w=><button key={w} onClick={()=>setWeather(w)} className={`text-2xl p-2 rounded-lg ${weather===w?'bg-blue-100 border-blue-300 border':'border border-transparent'}`}>{w}</button>)}</div>
+      <textarea value={mood} onChange={e=>setMood(e.target.value)} rows="2" placeholder="기분 한 줄" className="w-full border-2 rounded-xl p-2"/>
+      <button onClick={()=>{update({arrival:time, mood, weather}); toast('저장했어요!');}} className="w-full mt-3 py-3 rounded-xl bg-pink-300 font-bold">저장</button>
+    </div>
+  );
+}
+
+function TabSelfStudy({rec,update,notice,toast}){
+  const list = rec.selfStudy||[]; const running = list.find(x=>!x.endTime);
+  const [type,setType]=useState('독서'); const [memo,setMemo]=useState('');
+  const start = ()=>{ update({selfStudy:[...list,{type, startTime:new Date().toISOString(), endTime:null, minutes:0, memo:''}]}); };
+  const end = ()=>{
+    const idx = list.findIndex(x=>!x.endTime); if(idx<0) return;
+    const next = [...list];
+    next[idx] = {...next[idx], endTime:new Date().toISOString(), minutes: Math.max(1, Math.round((Date.now()-new Date(next[idx].startTime).getTime())/60000)), memo};
+    update({selfStudy:next}); setMemo('');
+  };
+  return (
+    <div className="pastel-card p-4">
+      <h3 className="text-xl font-bold mb-2">📚 자습 활동</h3>
+      <div className="flex flex-wrap gap-2 mb-3">{ACTIVITY_TYPES.map(t=><button key={t} onClick={()=>setType(t)} className={`px-3 py-2 rounded-xl border-2 ${type===t?'bg-pink-200':'bg-white'}`}>{t}</button>)}</div>
+      {!running ? <button onClick={start} className="w-full py-3 rounded-xl bg-green-300 font-bold">▶ 활동 시작</button> :
+      (<div className="bg-green-50 p-3 rounded-xl"><div className="font-bold">진행 중: {running.type}</div><input value={memo} onChange={e=>setMemo(e.target.value)} placeholder="한 줄 메모" className="w-full mt-2 p-2 border-2 rounded-xl"/><button onClick={end} className="w-full mt-2 py-3 rounded-xl bg-red-300 font-bold">■ 활동 종료</button></div>)}
+    </div>
+  );
+}
+
+function TabHomework({rec,update,notice,toast,cls}){
+  const teacherHw = (notice.homework||[]).map(h=>({...h,fromTeacher:true}));
+  const personal = (rec.homework||[]).filter(h=>!h.fromTeacher);
+  const merged = teacherHw.map(t=>{ const exist = (rec.homework||[]).find(h=>h.fromTeacher && h.subject===t.subject && h.content===t.content); return {...t, done: exist?.done||false}; });
+  const all = [...merged, ...personal];
+  const toggle = (i)=>{ const next = [...all]; next[i] = {...next[i], done:!next[i].done}; update({homework:next}); };
+  return (
+    <div className="pastel-card p-4">
+      <h3 className="text-xl font-bold mb-2">✏️ 숙제</h3>
+      {all.map((h,i)=>(<label key={i} className={`flex items-center gap-2 p-2 mb-2 border-2 rounded-xl ${h.done?'bg-green-50':'bg-white'}`}><input type="checkbox" checked={!!h.done} onChange={()=>toggle(i)} className="w-5 h-5"/> <div className="flex-1"><div>{h.subject}: {h.content}</div></div></label>))}
+    </div>
+  );
+}
+
+function TabBrush({rec,update,toast}){
+  const checked = rec.lunchBrushing?.checked;
+  return (
+    <div className="pastel-card p-4">
+      <h3 className="text-xl font-bold mb-2">🪥 양치 체크</h3>
+      <button onClick={()=>update({lunchBrushing:{checked:!checked, checkedAt:new Date().toISOString()}})} className={`w-full py-8 rounded-2xl text-3xl font-bold ${checked?'bg-green-200':'bg-white border-2'}`}>{checked?'🦷 완료!':'🪥 양치 했어요!'}</button>
+    </div>
+  );
+}
+
+function TabLearningNote({rec,update,cls}){
+  const tt = rec.timetable||[]; const notes = rec.learningNotes||[];
+  const setNote = (period, content)=>{
+    const subj = tt[period-1]||''; const next = [...notes];
+    const i = next.findIndex(n=>n.period===period);
+    if(i>=0) next[i] = {...next[i], subject:subj, content}; else next.push({period, subject:subj, content});
+    update({learningNotes:next});
+  };
+  return (
+    <div className="space-y-3">
+      {[1,2,3,4,5,6].map(p=>{
+        const subj = tt[p-1]; if(!subj) return null;
+        const c = notes.find(n=>n.period===p)?.content||'';
+        return (<div key={p} className="pastel-card p-3"><b>{p}교시 · {subj}</b> <textarea value={c} onChange={e=>setNote(p, e.target.value)} placeholder="배운 내용 (10자 이상)" className="w-full border-2 rounded-xl p-2 mt-2"/></div>);
+      })}
+    </div>
+  );
+}
+
+function TabTimetable({rec,update,cls,date}){
+  const tt = rec.timetable||['','','','','',''];
+  const setP = (i, v)=>{ const next = [...tt]; while(next.length<6) next.push(''); next[i]=v; update({timetable:next}); };
+  return (
+    <div className="pastel-card p-4">
+      <h3 className="text-xl font-bold mb-2">🗓️ {date} 시간표</h3>
+      <div className="space-y-2">{[1,2,3,4,5,6].map(p=>(<div key={p} className="flex items-center gap-2"><span className="w-12 font-bold">{p}교시</span><select value={tt[p-1]||''} onChange={e=>setP(p-1,e.target.value)} className="flex-1 border-2 rounded-xl p-2"><option value="">선택</option>{cls.subjects.map(s=><option key={s.name} value={s.name}>{s.name}</option>)}</select></div>))}</div>
+    </div>
+  );
+}
+
+function TabStudentDash(){ return <div className="pastel-card p-4">내 기록 통계 탭입니다. (동기화 중...)</div>; }
+function PinChangeModal({onClose}){ return <div className="fixed inset-0 bg-black/40" onClick={onClose}></div>; }
+
+/* ---------- 4) 선생님 앱 ---------- */
+function TeacherApp({logout,toast}){
+  const [tab,setTab]=useState('dash');
+  const [currentDate, setCurrentDate] = useState(todayStr());
+  const cls = LS.get('class');
+  const tabs = [{k:'arrival',label:'🏫 등교'}, {k:'self',label:'📚 자습'}, {k:'note',label:'📝 노트'}, {k:'dash',label:'📊 학급현황'}, {k:'students',label:'👥 관리'}];
+
+  return (
+    <div className="min-h-screen max-w-6xl mx-auto p-4">
+      <header className="flex items-center gap-3 mb-3">
+        <div className="text-3xl">👩‍🏫</div>
+        <div className="flex-1"><div className="text-xl font-extrabold">{cls.name}</div><input type="date" value={currentDate} onChange={(e) => setCurrentDate(e.target.value)} className="border rounded p-1 text-sm bg-white" /></div>
+        <button onClick={logout} className="text-xs px-3 py-2 border rounded-xl">로그아웃</button>
+      </header>
+      <div className="flex gap-1 mb-3 overflow-x-auto">{tabs.map(t=><button key={t.k} onClick={()=>setTab(t.k)} className={`tab-btn whitespace-nowrap ${tab===t.k?'active':'bg-white border'}`}>{t.label}</button>)}</div>
+      {tab==='dash' && <TDash cls={cls} date={currentDate} />}
+      {tab==='students' && <TStudents cls={cls} toast={toast} />}
+      {tab==='arrival' && <div className="pastel-card p-4">등교 관리 탭</div>}
+      {tab==='self' && <div className="pastel-card p-4">자습 관리 탭</div>}
+      {tab==='note' && <div className="pastel-card p-4">배움노트 확인 탭</div>}
+    </div>
+  );
+}
+
+function TDash({cls, date}){
+  const rows = cls.students.map(s=>{
+    const r=LS.get(`records_${s.id}`,{})[date]||{};
+    const done = computeProgress(r, cls, date).done;
+    return {s,done, r};
+  });
+  return (
+    <div className="pastel-card p-4 overflow-x-auto">
+      <h3 className="font-bold mb-2">📊 {date} 실시간 현황</h3>
+      <table className="w-full text-sm text-center"><thead><tr><th>번호</th><th>이름</th><th>등교</th><th>달성</th></tr></thead>
+        <tbody>{rows.map(({s,done,r})=>(<tr key={s.id} className="border-t"><td>{s.number}</td><td>{s.avatar} {s.name}</td><td>{r.arrival?`✅${r.arrival}`:'-'}</td><td>{done}/5</td></tr>))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function TStudents({cls}){ return <div className="pastel-card p-4">학생 관리 (Firebase 연동 중)</div>; }
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
